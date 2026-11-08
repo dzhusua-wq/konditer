@@ -22,12 +22,15 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Завантажити модель розпізнавання (MobileNetV3, ~4 МБ)
+      - name: Завантажити модель розпізнавання (MobileNetV3-large)
         run: |
           mkdir -p app/src/main/assets
-          curl -L -f -o app/src/main/assets/mobilenet_v3_small.tflite \
-            https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/latest/mobilenet_v3_small.tflite
+          curl -L -f -o app/src/main/assets/mobilenet_v3_large.tflite \
+            https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_large/float32/latest/mobilenet_v3_large.tflite
           ls -la app/src/main/assets
+
+      - name: Юніт-тести логіки розпізнавання
+        run: gradle testReleaseUnitTest --no-daemon
 
       - name: Зібрати APK
         run: gradle assembleRelease --no-daemon --stacktrace

@@ -3,15 +3,17 @@ package ua.konditer.app
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.graphics.Paint
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.ViewGroup
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
@@ -20,7 +22,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
-import androidx.recyclerview.widget.DividerItemDecoration
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -32,48 +34,40 @@ class CatalogActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_ENROLL_ID = "enroll_id"
+
+        private val thumbs = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
+            override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+        }
+
+        /** Мініатюра еталона (зменшена вдвічі), з кешем. */
+        fun thumb(sampleId: String): Bitmap? {
+            thumbs.get(sampleId)?.let { return it }
+            val f = Catalog.imageFile(sampleId)
+            if (!f.exists()) return null
+            val bmp = BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = 2 }) ?: return null
+            thumbs.put(sampleId, bmp)
+            return bmp
+        }
+    }
+
+    private sealed class Row {
+        class Header(val title: String) : Row()
+        class Entry(val item: Item) : Row()
     }
 
     private lateinit var b: ActivityCatalogBinding
-    private var items: List<Item> = emptyList()
+    private var rows: List<Row> = emptyList()
+    private var query = ""
 
     private val worker = Executors.newSingleThreadExecutor()
-    private var recognizer: Recognizer? = null
+    private var embedder: Embedder? = null
     private var pendingItemId: String? = null
 
     private val pickLauncher =
         registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
             val id = pendingItemId ?: return@registerForActivityResult
             pendingItemId = null
-            if (uris.isEmpty()) {
-                dropIfEmpty(id); reload()
-            } else importPhotos(id, uris)
-        }
-
-    private val exportLauncher =
-        registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-            if (uri == null) return@registerForActivityResult
-            try {
-                contentResolver.openOutputStream(uri)?.use { it.write(Catalog.toJson().toByteArray()) }
-                toast("Каталог збережено у файл")
-            } catch (e: Exception) {
-                toast("Помилка збереження: ${e.message}")
-            }
-        }
-
-    private val importLauncher =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri == null) return@registerForActivityResult
-            try {
-                val json = contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }
-                    ?: throw IllegalStateException("порожній файл")
-                val n = Catalog.importJson(json)
-                Catalog.save(this)
-                reload()
-                toast("Імпортовано виробів: $n")
-            } catch (e: Exception) {
-                toast("Це не файл каталогу: ${e.message}")
-            }
+            if (uris.isEmpty()) { dropIfEmpty(id); reload() } else importPhotos(id, uris)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,77 +76,72 @@ class CatalogActivity : AppCompatActivity() {
         b = ActivityCatalogBinding.inflate(layoutInflater)
         setContentView(b.root)
         ViewCompat.setOnApplyWindowInsetsListener(b.root) { v, insets ->
-            val s = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val s = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
             v.setPadding(s.left, s.top, s.right, s.bottom)
             insets
         }
-
         Catalog.load(this)
-        b.list.layoutManager = LinearLayoutManager(this)
-        b.list.addItemDecoration(DividerItemDecoration(this, DividerItemDecoration.VERTICAL))
-        b.list.adapter = adapter
 
+        b.list.layoutManager = LinearLayoutManager(this)
+        b.list.adapter = adapter
         b.btnBack.setOnClickListener { finish() }
         b.btnAddPhoto.setOnClickListener {
-            ItemDialog.show(this, "Новий виріб з фото", null, "Далі: вибрати фото") { name, weight, note ->
-                val item = Catalog.create(name, weight, note)
-                Catalog.save(this)
-                pickPhotos(item.id)
+            ItemDialog.edit(this, null) { item -> pickPhotos(item.id) }
+        }
+        b.editSearch.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, c: Int, d: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, c: Int, d: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                query = s?.toString()?.trim()?.lowercase().orEmpty(); reload()
             }
-        }
-        b.btnMore.setOnClickListener {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Файл каталогу")
-                .setItems(
-                    arrayOf(
-                        "Зберегти каталог у файл (резервна копія / на інший телефон)",
-                        "Завантажити каталог з файлу"
-                    )
-                ) { _, which ->
-                    if (which == 0) exportLauncher.launch("konditer-catalog.json")
-                    else importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*"))
-                }
-                .show()
-        }
+        })
+    }
+
+    override fun onResume() {
+        super.onResume()
         reload()
     }
 
     private fun reload() {
-        items = Catalog.all()
-        val shots = items.sumOf { it.shots.size }
-        b.txtTitle.text = "Каталог (${items.size})"
-        b.txtEmpty.isVisible = items.isEmpty()
+        val all = Catalog.all()
+        val shown = if (query.isEmpty()) all else all.filter {
+            it.name.lowercase().contains(query) || it.category.lowercase().contains(query) ||
+                it.article.lowercase().contains(query) || it.description.lowercase().contains(query)
+        }
+        val out = ArrayList<Row>()
+        shown.groupBy { it.category.ifBlank { "Без категорії" } }.forEach { (cat, list) ->
+            out.add(Row.Header("$cat · ${list.size}"))
+            list.forEach { out.add(Row.Entry(it)) }
+        }
+        rows = out
+        b.txtTitle.text = "Каталог · ${all.size}"
+        b.txtEmpty.isVisible = shown.isEmpty()
+        b.txtEmpty.text = if (all.isEmpty())
+            "Поки що порожньо.\n\nДодайте виріб на екрані камери («+ Додати») або тут з готових фото («+ З фото»)."
+        else "Нічого не знайдено"
         adapter.notifyDataSetChanged()
-        if (items.isNotEmpty()) b.txtTitle.contentDescription = "Виробів ${items.size}, знімків $shots"
     }
 
     private fun openItem(item: Item) {
+        val actions = arrayOf(
+            "Дозняти камерою",
+            "Додати фото з галереї",
+            "Переглянути еталони (${item.samples.size})",
+            "Редагувати дані",
+            "Видалити виріб"
+        )
         MaterialAlertDialogBuilder(this)
             .setTitle(item.name)
-            .setItems(
-                arrayOf("Дозняти камерою", "Додати фото з галереї", "Редагувати дані", "Видалити")
-            ) { _, which ->
+            .setItems(actions) { _, which ->
                 when (which) {
-                    0 -> {
-                        setResult(RESULT_OK, Intent().putExtra(EXTRA_ENROLL_ID, item.id))
-                        finish()
-                    }
+                    0 -> { setResult(RESULT_OK, Intent().putExtra(EXTRA_ENROLL_ID, item.id)); finish() }
                     1 -> pickPhotos(item.id)
-                    2 -> ItemDialog.show(this, "Редагування", item, "Зберегти") { name, weight, note ->
-                        Catalog.get(item.id)?.apply {
-                            this.name = name; this.weight = weight; this.note = note
-                        }
-                        Catalog.save(this)
-                        reload()
-                    }
-                    3 -> MaterialAlertDialogBuilder(this)
+                    2 -> showSamples(item)
+                    3 -> ItemDialog.edit(this, item) { reload() }
+                    4 -> MaterialAlertDialogBuilder(this)
                         .setTitle("Видалити «${item.name}»?")
-                        .setMessage("Усі знімки цього виробу буде видалено.")
-                        .setPositiveButton("Видалити") { _, _ ->
-                            Catalog.remove(item.id)
-                            Catalog.save(this)
-                            reload()
-                        }
+                        .setMessage("Буде видалено виріб і всі його еталонні фото (${item.samples.size}).")
+                        .setPositiveButton("Видалити") { _, _ -> Catalog.removeItem(item.id); reload() }
                         .setNegativeButton("Скасувати", null)
                         .show()
                 }
@@ -160,7 +149,54 @@ class CatalogActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------------- Еталони з галереї / файлів друку ----------------
+    /** Сітка еталонних фото: торкніться фото, щоб видалити невдале (розмите, не той виріб). */
+    private fun showSamples(item0: Item) {
+        val item = Catalog.get(item0.id) ?: return
+        if (item.samples.isEmpty()) { toast("Еталонів немає — дозніміть камерою"); return }
+        val dp = resources.displayMetrics.density
+        val grid = RecyclerView(this)
+        grid.layoutManager = GridLayoutManager(this, 4)
+        grid.setPadding((12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt(), 0)
+        var samples = item.samples.toList()
+        val dlg = MaterialAlertDialogBuilder(this)
+            .setTitle("Еталони «${item.name}»")
+            .setMessage("Торкніться фото, щоб видалити невдале.")
+            .setView(grid)
+            .setPositiveButton("Закрити") { _, _ -> reload() }
+            .create()
+        grid.adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                val iv = ImageView(parent.context).apply {
+                    val s = (parent.width / 4).coerceAtLeast((64 * dp).toInt())
+                    layoutParams = ViewGroup.LayoutParams(s, s)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setPadding((2 * dp).toInt(), (2 * dp).toInt(), (2 * dp).toInt(), (2 * dp).toInt())
+                }
+                return object : RecyclerView.ViewHolder(iv) {}
+            }
+            override fun getItemCount() = samples.size
+            override fun onBindViewHolder(h: RecyclerView.ViewHolder, pos: Int) {
+                val s = samples[pos]
+                (h.itemView as ImageView).setImageBitmap(thumb(s.id))
+                h.itemView.setOnClickListener {
+                    MaterialAlertDialogBuilder(this@CatalogActivity)
+                        .setTitle("Видалити цей еталон?")
+                        .setPositiveButton("Видалити") { _, _ ->
+                            Catalog.removeSample(item.id, s.id)
+                            samples = Catalog.get(item.id)?.samples?.toList() ?: emptyList()
+                            notifyDataSetChanged()
+                            if (samples.isEmpty()) dlg.dismiss()
+                        }
+                        .setNegativeButton("Скасувати", null)
+                        .show()
+                }
+            }
+        }
+        dlg.setOnDismissListener { reload() }
+        dlg.show()
+    }
+
+    // ---------------- Еталони з галереї (файли друку, фото) ----------------
 
     private fun pickPhotos(itemId: String) {
         pendingItemId = itemId
@@ -169,10 +205,7 @@ class CatalogActivity : AppCompatActivity() {
 
     private fun dropIfEmpty(id: String) {
         val item = Catalog.get(id) ?: return
-        if (item.shots.isEmpty()) {
-            Catalog.remove(id)
-            Catalog.save(this)
-        }
+        if (item.samples.isEmpty()) Catalog.removeItem(id)
     }
 
     private fun importPhotos(id: String, uris: List<Uri>) {
@@ -185,24 +218,28 @@ class CatalogActivity : AppCompatActivity() {
             var added = 0
             var error: String? = null
             try {
-                val rec = recognizer ?: Recognizer(applicationContext).also { recognizer = it }
+                val emb = embedder ?: Embedder(applicationContext).also { embedder = it }
                 for ((i, uri) in uris.withIndex()) {
                     val bmp = loadBitmap(uri)
                     if (bmp != null) {
-                        for (v in variants(bmp)) Catalog.addShot(id, rec.describe(v))
+                        // Два варіанти: виріб впритул до рамки і з полями — як буває при зйомці камерою
+                        for (margin in listOf(0.03f, 0.15f)) {
+                            val sq = Embedder.onWhiteSquare(bmp, margin)
+                            Catalog.addSample(id, sq, emb.describeAugmented(sq), Sample.SRC_GALLERY)
+                        }
                         added++
                     }
                     runOnUiThread { progress.setMessage("${i + 1} з ${uris.size}") }
                 }
-                Catalog.save(applicationContext)
             } catch (e: Throwable) {
                 error = e.message
+                App.logError(this, "Імпорт фото", e)
             }
             runOnUiThread {
                 progress.dismiss()
                 dropIfEmpty(id)
                 reload()
-                toast(if (error != null) "Помилка: $error" else "Додано фото: $added")
+                toast(error?.let { "Помилка: $it" } ?: "Додано фото: $added. Порада: дозніміть ще 3–5 разів камерою.")
             }
         }
     }
@@ -222,59 +259,61 @@ class CatalogActivity : AppCompatActivity() {
             contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1024) sample *= 2
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+            }
         }
     } catch (_: Exception) {
         null
     }
 
-    /**
-     * Камера бачить виріб у квадратній рамці на світлому фоні, тому картинку кладемо
-     * на білий квадрат: один варіант впритул, другий — з полями (виріб трохи менший у рамці).
-     */
-    private fun variants(src: Bitmap): List<Bitmap> {
-        fun onWhiteSquare(marginFraction: Float): Bitmap {
-            val side = (maxOf(src.width, src.height) * (1f + 2 * marginFraction)).toInt()
-            val out = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
-            val c = Canvas(out)
-            c.drawColor(Color.WHITE)
-            c.drawBitmap(
-                src,
-                ((side - src.width) / 2f),
-                ((side - src.height) / 2f),
-                Paint(Paint.FILTER_BITMAP_FLAG)
-            )
-            return out
-        }
-        return listOf(onWhiteSquare(0.02f), onWhiteSquare(0.15f))
-    }
-
     override fun onDestroy() {
         super.onDestroy()
-        worker.execute { recognizer?.close(); recognizer = null }
+        worker.execute { embedder?.close(); embedder = null }
         worker.shutdown()
     }
 
-    private val adapter = object : RecyclerView.Adapter<Holder>() {
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-            Holder(ItemCatalogBinding.inflate(LayoutInflater.from(parent.context), parent, false))
+    // ---------------- Список ----------------
 
-        override fun getItemCount() = items.size
+    private val adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        override fun getItemViewType(position: Int) = if (rows[position] is Row.Header) 0 else 1
+        override fun getItemCount() = rows.size
 
-        override fun onBindViewHolder(h: Holder, position: Int) {
-            val item = items[position]
-            h.v.txtName.text = item.name
-            h.v.txtSub.text = buildString {
-                if (item.weight.isNotBlank()) append(item.weight).append(" · ")
-                append("знімків: ").append(item.shots.size)
-                if (item.shots.size < 8) append(" — варто дозняти")
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == 0) {
+                val dp = parent.resources.displayMetrics.density
+                val tv = TextView(parent.context).apply {
+                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
+                    alpha = 0.7f
+                    setPadding((16 * dp).toInt(), (16 * dp).toInt(), (16 * dp).toInt(), (4 * dp).toInt())
+                }
+                return object : RecyclerView.ViewHolder(tv) {}
             }
-            h.v.root.setOnClickListener { openItem(item) }
+            return Holder(ItemCatalogBinding.inflate(LayoutInflater.from(parent.context), parent, false))
+        }
+
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
+            when (val row = rows[position]) {
+                is Row.Header -> (h.itemView as TextView).text = row.title.uppercase()
+                is Row.Entry -> {
+                    val v = (h as Holder).v
+                    val item = row.item
+                    v.txtName.text = item.name
+                    v.txtSub.text = item.shortInfo().ifEmpty { if (item.kind == Kind.FLAT) "плоский" else "об'ємний" }
+                    v.imgThumb.setImageBitmap(item.samples.firstOrNull()?.let { thumb(it.id) })
+                    val n = item.samples.size
+                    v.txtBadge.text = when {
+                        n == 0 -> "⚠ немає фото"
+                        n < item.targetSamples -> "⚠ $n фото"
+                        else -> "✓ $n фото"
+                    }
+                    v.root.setOnClickListener { openItem(item) }
+                }
+            }
         }
     }
 
-    class Holder(val v: ItemCatalogBinding) : RecyclerView.ViewHolder(v.root)
+    private class Holder(val v: ItemCatalogBinding) : RecyclerView.ViewHolder(v.root)
 
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 }
