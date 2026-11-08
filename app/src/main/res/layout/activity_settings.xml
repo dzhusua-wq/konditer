@@ -42,6 +42,38 @@
             android:paddingEnd="20dp"
             android:paddingBottom="24dp">
 
+            <!-- Нейромережа -->
+            <TextView style="@style/SettingsHeader" android:text="Нейромережа" />
+
+            <RadioGroup
+                android:id="@+id/groupModel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <com.google.android.material.radiobutton.MaterialRadioButton
+                    android:id="@+id/modelAccurate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+
+                <com.google.android.material.radiobutton.MaterialRadioButton
+                    android:id="@+id/modelFast"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+            </RadioGroup>
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchIsolate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Виділяти виріб від фону (стіл, тіні не заважають)" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchOrb"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Перевірка дрібних деталей для плоских виробів (топери, печиво)" />
+
             <!-- Розпізнавання -->
             <TextView style="@style/SettingsHeader" android:text="Розпізнавання" />
 

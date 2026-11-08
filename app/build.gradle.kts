@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "2.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        versionName = "3.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
@@ -38,7 +38,14 @@ android {
 
     // Модель має лежати в APK нестиснутою
     androidResources {
-        noCompress += "tflite"
+        noCompress += listOf("tflite", "onnx")
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+            pickFirsts += listOf("**/libc++_shared.so")
+        }
     }
 
     compileOptions {
@@ -65,6 +72,8 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.mediapipe:tasks-vision:0.10.20")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    implementation("org.opencv:opencv:4.10.0")
 
     testImplementation("junit:junit:4.13.2")
 }

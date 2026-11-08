@@ -218,14 +218,18 @@ class CatalogActivity : AppCompatActivity() {
             var added = 0
             var error: String? = null
             try {
-                val emb = embedder ?: Embedder(applicationContext).also { embedder = it }
+                val emb = embedder ?: Embedder.create(applicationContext, Prefs.model(this), Prefs.isolate(this))
+                    .also { embedder = it }
+                Catalog.switchKey(emb.key)
+                // З виділенням виробу поля не важливі; без нього — два варіанти, як буває при зйомці
+                val margins = if (emb.isolate) listOf(0.06f) else listOf(0.03f, 0.15f)
                 for ((i, uri) in uris.withIndex()) {
                     val bmp = loadBitmap(uri)
                     if (bmp != null) {
-                        // Два варіанти: виріб впритул до рамки і з полями — як буває при зйомці камерою
-                        for (margin in listOf(0.03f, 0.15f)) {
-                            val sq = Embedder.onWhiteSquare(bmp, margin)
-                            Catalog.addSample(id, sq, emb.describeAugmented(sq), Sample.SRC_GALLERY)
+                        for (margin in margins) {
+                            val sq = ImageOps.onWhiteSquare(bmp, margin)
+                            val hi = ImageOps.onWhiteSquare(bmp, margin, ImageOps.HI)
+                            Catalog.addSample(id, sq, hi, emb.describeAugmented(sq), Sample.SRC_GALLERY)
                         }
                         added++
                     }

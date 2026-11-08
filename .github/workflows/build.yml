@@ -22,11 +22,13 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Завантажити модель розпізнавання (MobileNetV3-large)
+      - name: Завантажити нейромережі (MobileNetV3-large, DINOv2-small)
         run: |
           mkdir -p app/src/main/assets
           curl -L -f -o app/src/main/assets/mobilenet_v3_large.tflite \
             https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_large/float32/latest/mobilenet_v3_large.tflite
+          curl -L -f -o app/src/main/assets/dinov2_small_q.onnx \
+            https://huggingface.co/onnx-community/dinov2-small/resolve/main/onnx/model_quantized.onnx
           ls -la app/src/main/assets
 
       - name: Юніт-тести логіки розпізнавання

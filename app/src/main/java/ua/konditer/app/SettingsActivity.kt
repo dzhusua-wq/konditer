@@ -82,6 +82,19 @@ class SettingsActivity : AppCompatActivity() {
             radios.entries.find { it.value.id == id }?.let { Prefs.setSensitivity(this, it.key) }
         }
 
+        // Нейромережа
+        val models = mapOf(ModelChoice.ACCURATE to b.modelAccurate, ModelChoice.FAST to b.modelFast)
+        models.forEach { (m, r) -> r.text = m.label }
+        models[Prefs.model(this)]?.isChecked = true
+        b.groupModel.setOnCheckedChangeListener { _, id ->
+            models.entries.find { it.value.id == id }?.let { Prefs.setModel(this, it.key); keyChanged() }
+        }
+        b.switchIsolate.isChecked = Prefs.isolate(this)
+        b.switchIsolate.setOnCheckedChangeListener { _, v -> Prefs.setIsolate(this, v); keyChanged() }
+        b.switchOrb.isChecked = Prefs.orb(this)
+        b.switchOrb.isEnabled = App.opencvReady
+        b.switchOrb.setOnCheckedChangeListener { _, v -> Prefs.setOrb(this, v) }
+
         b.switchVibrate.isChecked = Prefs.vibrate(this)
         b.switchVibrate.setOnCheckedChangeListener { _, v -> Prefs.setVibrate(this, v) }
         b.switchDebug.isChecked = Prefs.debug(this)
@@ -131,7 +144,7 @@ class SettingsActivity : AppCompatActivity() {
         }
         b.btnClearLog.setOnClickListener { App.logFile(this).delete(); refresh() }
 
-        b.txtVersion.text = "Кондитер ${BuildConfig.VERSION_NAME} · модель ${Embedder.MODEL_ID}"
+        b.txtVersion.text = "Кондитер ${BuildConfig.VERSION_NAME}\nвектори: ${Catalog.activeKey} · OpenCV: ${if (App.opencvReady) "так" else "ні"}"
         refresh()
     }
 
@@ -172,6 +185,10 @@ class SettingsActivity : AppCompatActivity() {
             }
             runOnUiThread { b.txtCheck.text = text; b.btnCheck.isEnabled = true }
         }
+    }
+
+    private fun keyChanged() {
+        toast("Зміниться після повернення на екран камери. Еталони перерахуються з фото автоматично.")
     }
 
     private fun finishWith(action: String) {

@@ -12,6 +12,11 @@ import java.util.Locale
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        opencvReady = try {
+            org.opencv.android.OpenCVLoader.initLocal()
+        } catch (e: Throwable) {
+            logError(this, "OpenCV не завантажився", e); false
+        }
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {
@@ -23,6 +28,10 @@ class App : Application() {
     }
 
     companion object {
+        @Volatile
+        var opencvReady = false
+            private set
+
         fun logFile(ctx: Context) = File(ctx.filesDir, "errors.log")
 
         fun logError(ctx: Context, what: String, e: Throwable?) {
@@ -55,6 +64,22 @@ object Prefs {
 
     fun autoCapture(ctx: Context) = sp(ctx).getBoolean("auto_capture", true)
     fun setAutoCapture(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("auto_capture", v).apply()
+
+    fun model(ctx: Context): ModelChoice =
+        runCatching { ModelChoice.valueOf(sp(ctx).getString("model", null) ?: "") }.getOrDefault(ModelChoice.ACCURATE)
+
+    fun setModel(ctx: Context, m: ModelChoice) = sp(ctx).edit().putString("model", m.name).apply()
+
+    /** Автоматично відокремлювати виріб від фону. */
+    fun isolate(ctx: Context) = sp(ctx).getBoolean("isolate", true)
+    fun setIsolate(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("isolate", v).apply()
+
+    /** Перевірка дрібних деталей для плоских виробів. */
+    fun orb(ctx: Context) = sp(ctx).getBoolean("orb", true)
+    fun setOrb(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("orb", v).apply()
+
+    /** Ключ векторів для поточних налаштувань (має збігатися з Embedder.key). */
+    fun vectorKey(ctx: Context) = model(ctx).id + if (isolate(ctx)) "+iso" else ""
 
     /** Чи вже показували підказку про навчання фону. */
     fun bgHintShown(ctx: Context) = sp(ctx).getBoolean("bg_hint", false)

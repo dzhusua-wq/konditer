@@ -48,6 +48,12 @@ class Item(
     ).filterNotNull().joinToString(" · ")
 }
 
+/** Нейромережа для розпізнавання (налаштування). */
+enum class ModelChoice(val id: String, val label: String) {
+    ACCURATE("dinov2s-1", "Точна — DINOv2 (рекомендовано)"),
+    FAST("mpv3l-1", "Швидка — MobileNetV3 (для слабких телефонів)")
+}
+
 /** Чутливість упізнавання (налаштування). */
 enum class Sensitivity(val label: String, val relLow: Float, val needConf: Float) {
     STRICT("Сувора — менше помилок, частіше «не впізнано»", 0.85f, 0.60f),

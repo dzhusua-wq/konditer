@@ -25,7 +25,8 @@ import java.util.zip.ZipOutputStream
  *
  *  catalog/catalog.json        — дані виробів (назва, вага, ціна…) і список еталонів
  *  catalog/samples/<id>.jpg    — фото кожного еталона (кроп рамки 256×256)
- *  catalog/samples/<id>.vec    — вектори нейромережі (float16), рахуються з фото
+ *  catalog/samples/<id>.hi.jpg — детальне фото до 512 px (перевірка дрібних деталей)
+ *  catalog/samples/<id>.<модель>.vec — вектори нейромережі (float16), окремо для кожної моделі
  *
  * Фото зберігаються навмисно: якщо в новій версії зміниться нейромережа,
  * вектори перерахуються з фото автоматично, переснімати нічого не доведеться.
@@ -41,7 +42,10 @@ object Catalog {
 
     private val items = mutableListOf<Item>()
     private val background = mutableListOf<Sample>()
-    private var modelId = Embedder.MODEL_ID
+    /** Ключ активної моделі (див. Embedder.key): вектори різних моделей не змішуються. */
+    @Volatile
+    var activeKey = ""
+        private set
     private var loaded = false
     private lateinit var root: File
     private lateinit var samplesDir: File
@@ -64,6 +68,11 @@ object Catalog {
         loaded = true
         root = File(ctx.filesDir, "catalog").apply { mkdirs() }
         samplesDir = File(root, "samples").apply { mkdirs() }
+        activeKey = Prefs.vectorKey(ctx)
+        // v2 зберігала вектори як <id>.vec (MobileNetV3) — перейменовуємо
+        samplesDir.listFiles()?.filter { OLD_VEC.matches(it.name) }?.forEach {
+            it.renameTo(File(samplesDir, it.name.removeSuffix(".vec") + "." + ModelChoice.FAST.id + ".vec"))
+        }
         val f = File(root, "catalog.json")
         try {
             if (f.exists()) parse(JSONObject(f.readText()), replace = true)
@@ -86,7 +95,7 @@ object Catalog {
         for (it in items) arr.put(itemJson(it))
         return JSONObject()
             .put("format", 2)
-            .put("model", modelId)
+            .put("key", activeKey)
             .put("items", arr)
             .put("background", samplesJson(background))
     }
@@ -119,10 +128,8 @@ object Catalog {
 
     /** Розбирає catalog.json. replace=false — злиття (імпорт). Повертає кількість виробів. */
     private fun parse(j: JSONObject, replace: Boolean): Int {
-        val fileModel = j.optString("model", "")
         if (replace) {
             items.clear(); background.clear()
-            modelId = fileModel.ifEmpty { Embedder.MODEL_ID }
         }
         val arr = j.optJSONArray("items") ?: JSONArray()
         for (i in 0 until arr.length()) {
@@ -198,7 +205,8 @@ object Catalog {
         (items.map { it.category }.filter { it.isNotBlank() } + DEFAULT_CATEGORIES).distinct()
 
     fun imageFile(sampleId: String) = File(samplesDir, "$sampleId.jpg")
-    private fun vecFile(sampleId: String) = File(samplesDir, "$sampleId.vec")
+    fun hiFile(sampleId: String) = File(samplesDir, "$sampleId.hi.jpg")
+    private fun vecFile(sampleId: String) = File(samplesDir, "$sampleId.$activeKey.vec")
 
     /** Фото для мініатюри виробу (перший еталон). */
     @Synchronized
@@ -229,9 +237,10 @@ object Catalog {
     }
 
     /** Додає еталон виробу (або фону, якщо target == BACKGROUND). Повертає null, якщо ліміт вичерпано. */
-    fun addSample(target: String, crop: Bitmap, shots: List<Shot>, source: String): Sample? {
+    fun addSample(target: String, crop: Bitmap, hi: Bitmap?, shots: List<Shot>, source: String): Sample? {
         val s = Sample(UUID.randomUUID().toString(), source, System.currentTimeMillis(), shots)
         FileOutputStream(imageFile(s.id)).use { crop.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        if (hi != null) FileOutputStream(hiFile(s.id)).use { hi.compress(Bitmap.CompressFormat.JPEG, 88, it) }
         writeVec(s.id, shots)
         synchronized(this) {
             val list = if (target == BACKGROUND) background else get(target)?.samples
@@ -261,22 +270,36 @@ object Catalog {
     }
 
     private fun deleteFiles(id: String) {
-        imageFile(id).delete(); vecFile(id).delete()
+        filesOf(id).forEach { it.delete() }
     }
+
+    /** Усі файли еталона: фото, детальне фото, вектори всіх моделей. */
+    private fun filesOf(id: String): List<File> =
+        samplesDir.listFiles()?.filter { it.name.startsWith("$id.") } ?: emptyList()
 
     // ---------------- Перерахунок векторів (нова модель) ----------------
 
     @Synchronized
-    fun needsReindex(): Boolean {
-        val all = items.flatMap { it.samples } + background
-        return all.isNotEmpty() && (modelId != Embedder.MODEL_ID || all.any { it.shots.isEmpty() })
+    fun needsReindex(): Boolean = (items.flatMap { it.samples } + background).any { it.shots.isEmpty() }
+
+    /** Перемикає активну модель: підвантажує її вектори (яких немає — треба перерахувати). */
+    @Synchronized
+    fun switchKey(key: String) {
+        if (key == activeKey) return
+        activeKey = key
+        for (s in items.flatMap { it.samples } + background) s.shots = readVec(s.id)
+        save(); rebuild()
     }
 
-    /** Перераховує вектори з фото. Викликати у фоновому потоці з тим самим [embedder]. */
-    fun reindex(embedder: Embedder, progress: (Int, Int) -> Unit) {
+    /**
+     * Рахує вектори з фото для еталонів, у яких їх немає (або для всіх, якщо [force]).
+     * Викликати у фоновому потоці з тим самим [embedder].
+     */
+    fun reindex(embedder: Embedder, force: Boolean, progress: (Int, Int) -> Unit) {
+        switchKey(embedder.key)
         val todo: List<Sample> = synchronized(this) {
             val all = items.flatMap { it.samples } + background
-            if (modelId != Embedder.MODEL_ID) all else all.filter { it.shots.isEmpty() }
+            if (force) all else all.filter { it.shots.isEmpty() }
         }
         todo.forEachIndexed { i, s ->
             val bmp = BitmapFactory.decodeFile(imageFile(s.id).path)
@@ -286,11 +309,9 @@ object Catalog {
                 s.shots = shots
             }
             progress(i + 1, todo.size)
+            if (i % 20 == 19) synchronized(this) { rebuild() }
         }
-        synchronized(this) {
-            modelId = Embedder.MODEL_ID
-            save(); rebuild()
-        }
+        synchronized(this) { save(); rebuild() }
     }
 
     // ---------------- Вектори на диску (float16) ----------------
@@ -330,7 +351,8 @@ object Catalog {
 
     // ---------------- Експорт / імпорт (zip) ----------------
 
-    private val SAFE_NAME = Regex("[A-Za-z0-9-]+\\.(jpg|vec)")
+    private val SAFE_NAME = Regex("[A-Za-z0-9-]+(\\.[A-Za-z0-9+-]+)*\\.(jpg|vec)")
+    private val OLD_VEC = Regex("[A-Za-z0-9-]+\\.vec")
 
     @Synchronized
     fun exportZip(out: OutputStream) {
@@ -339,8 +361,7 @@ object Catalog {
             zip.write(toJson().toString(2).toByteArray())
             zip.closeEntry()
             val ids = items.flatMap { it.samples }.map { it.id } + background.map { it.id }
-            for (id in ids) for (f in listOf(imageFile(id), vecFile(id))) {
-                if (!f.exists()) continue
+            for (id in ids) for (f in filesOf(id)) {
                 zip.putNextEntry(ZipEntry("samples/${f.name}"))
                 f.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
@@ -363,18 +384,6 @@ object Catalog {
             }
         }
         val j = json ?: throw IllegalArgumentException("у файлі немає catalog.json")
-        // Вектори іншої моделі непридатні — видаляємо, вони перерахуються з фото
-        if (j.optString("model") != Embedder.MODEL_ID) {
-            val ids = mutableListOf<String>()
-            val arr = j.optJSONArray("items") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val ss = arr.getJSONObject(i).optJSONArray("samples") ?: continue
-                for (k in 0 until ss.length()) ids.add(ss.getJSONObject(k).getString("id"))
-            }
-            val bg = j.optJSONArray("background") ?: JSONArray()
-            for (k in 0 until bg.length()) ids.add(bg.getJSONObject(k).getString("id"))
-            ids.forEach { vecFile(it).delete() }
-        }
         synchronized(this) {
             val n = parse(j, replace = false)
             save(); rebuild()

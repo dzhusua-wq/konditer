@@ -61,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     /** Результат обробки одного кадру (створюється у фоновому потоці). */
     private class FrameResult(
         val crop: Bitmap,
+        val hi: Bitmap,
         val shot: Shot,
         val sharp: Float,
         val bright: Float,
@@ -82,6 +83,8 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var frameCenterY = 0f
     @Volatile private var sensitivity = Sensitivity.NORMAL
     @Volatile private var enrollTarget: String? = null
+    @Volatile private var useOrb = true
+    private var orb: OrbVerifier? = null
     private var lastRun = 0L
     private var errorLogged = false
 
@@ -141,15 +144,7 @@ class MainActivity : AppCompatActivity() {
         Catalog.load(this)
         setupButtons()
 
-        executor.execute {
-            try {
-                embedder = Embedder(applicationContext)
-                runOnUiThread { reindex(force = false) }
-            } catch (e: Throwable) {
-                App.logError(this, "Завантаження моделі", e)
-                runOnUiThread { showCard(CardState.LOADING, "Помилка завантаження моделі", e.message ?: "") }
-            }
-        }
+        loadEmbedder()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
             startCamera()
@@ -163,8 +158,41 @@ class MainActivity : AppCompatActivity() {
         b.txtDebug.isVisible = debug
         stabilizer.reset()
         shownItemId = null
-        // Після імпорту копії вектори могли бути від іншої моделі
-        if (embedder != null && !busy && enrollTarget == null && Catalog.needsReindex()) reindex(force = false)
+        useOrb = Prefs.orb(this) && App.opencvReady
+        val emb = embedder
+        if (emb != null && !busy && enrollTarget == null) {
+            if (emb.key != Prefs.vectorKey(this)) loadEmbedder()          // змінили модель у налаштуваннях
+            else if (Catalog.needsReindex()) reindex(force = false)      // після імпорту копії
+        }
+    }
+
+    /** Завантажує (або замінює) нейромережу згідно з налаштуваннями. */
+    private fun loadEmbedder() {
+        val model = Prefs.model(this)
+        val isolate = Prefs.isolate(this)
+        busy = true
+        showCard(CardState.LOADING, "Завантаження нейромережі…", model.label)
+        executor.execute {
+            try {
+                embedder?.close()
+                embedder = null
+                val e = Embedder.create(applicationContext, model, isolate)
+                Catalog.switchKey(e.key)
+                embedder = e
+                runOnUiThread { busy = false; reindex(force = false) }
+            } catch (e: Throwable) {
+                App.logError(this, "Завантаження моделі ${model.id}", e)
+                runOnUiThread {
+                    busy = false
+                    showCard(CardState.LOADING, "Помилка завантаження нейромережі", e.message ?: "")
+                    if (model != ModelChoice.FAST) {
+                        toast("Перемикаю на швидку модель")
+                        Prefs.setModel(this, ModelChoice.FAST)
+                        loadEmbedder()
+                    }
+                }
+            }
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -267,10 +295,12 @@ class MainActivity : AppCompatActivity() {
             val upright = if (rot != 0) {
                 Bitmap.createBitmap(frame, 0, 0, frame.width, frame.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
             } else frame
-            val crop = cropToFrame(upright)
+            val native = cropToFrame(upright)
+            val crop = ImageOps.scaleTo(native, ImageOps.CROP)
+            val hi = if (native.width > ImageOps.HI) ImageOps.scaleTo(native, ImageOps.HI) else native
             val shot = emb.describe(crop)
-            val sharp = Embedder.sharpness(crop)
-            val bright = Embedder.brightness(crop)
+            val sharp = ImageOps.sharpness(crop)
+            val bright = ImageOps.brightness(crop)
 
             var decision: MatchIndex.Decision? = null
             var ranked: List<MatchIndex.Ranked> = emptyList()
@@ -278,9 +308,14 @@ class MainActivity : AppCompatActivity() {
                 val idx = Catalog.index
                 val r = idx.query(shot)
                 ranked = r.ranked.take(8)
-                decision = idx.decide(r, sensitivity)
+                var d = idx.decide(r, sensitivity)
+                if (useOrb) {
+                    val v = orb ?: OrbVerifier().also { orb = it }
+                    d = v.refine(d, r.ranked, hi)
+                }
+                decision = d
             }
-            val fr = FrameResult(crop, shot, sharp, bright, decision, ranked, SystemClock.elapsedRealtime())
+            val fr = FrameResult(crop, hi, shot, sharp, bright, decision, ranked, SystemClock.elapsedRealtime())
             runOnUiThread { onFrame(fr) }
         } catch (e: Throwable) {
             Log.e(TAG, "analyze", e)
@@ -290,7 +325,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Вирізає з кадру рівно ту область, яку видно в рамці, і зводить до 256×256. */
+    /** Вирізає з кадру рівно ту область, яку видно в рамці (у рідній роздільності). */
     private fun cropToFrame(img: Bitmap): Bitmap {
         val iw = img.width
         val ih = img.height
@@ -310,8 +345,7 @@ class MainActivity : AppCompatActivity() {
         side = side.coerceIn(32, min(iw, ih))
         val left = ((iw - side) / 2).coerceIn(0, iw - side)
         val top = (cy - side / 2).coerceIn(0, ih - side)
-        val c = Bitmap.createBitmap(img, left, top, side, side)
-        return Bitmap.createScaledBitmap(c, Embedder.CROP, Embedder.CROP, true)
+        return Bitmap.createBitmap(img, left, top, side, side)
     }
 
     // =====================================================================
@@ -459,7 +493,7 @@ class MainActivity : AppCompatActivity() {
         pending++
         executor.execute {
             val ok = try {
-                Catalog.addSample(target, fr.crop, emb.describeAugmented(fr.crop), source) != null
+                Catalog.addSample(target, fr.crop, fr.hi, emb.describeAugmented(fr.crop), source) != null
             } catch (e: Throwable) {
                 App.logError(this, "Збереження еталона", e); false
             }
@@ -655,8 +689,7 @@ class MainActivity : AppCompatActivity() {
         showCard(CardState.LOADING, "Оновлення еталонів…", "Нова версія розпізнавання. Це разова дія.")
         executor.execute {
             try {
-                if (force) Catalog.all().flatMap { it.samples }.forEach { it.shots = emptyList() }
-                Catalog.reindex(emb) { i, n ->
+                Catalog.reindex(emb, force) { i, n ->
                     runOnUiThread { b.txtDetails.text = "Оброблено $i з $n" }
                 }
             } catch (e: Throwable) {
@@ -682,7 +715,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        executor.execute { embedder?.close(); embedder = null }
+        executor.execute { embedder?.close(); embedder = null; orb?.clear() }
         executor.shutdown()
     }
 }
