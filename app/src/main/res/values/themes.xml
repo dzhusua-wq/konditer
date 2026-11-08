@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#E86A92</color>
+    <color name="brand_bg">#FFF1F5</color>
+
+    <style name="Theme.Konditer" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#FFB1C8</item>
+        <item name="colorOnPrimary">#5E1133</item>
+        <item name="colorPrimaryContainer">#7B2949</item>
+        <item name="colorOnPrimaryContainer">#FFD9E2</item>
+        <item name="colorSecondaryContainer">#5A3F47</item>
+        <item name="colorOnSecondaryContainer">#FFD9E2</item>
+    </style>
+</resources>

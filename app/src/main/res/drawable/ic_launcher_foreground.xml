@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Квіточка з цукрової маси в рамці видошукача -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Кути рамки -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#7B2949"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M30,40 L30,30 L40,30 M68,30 L78,30 L78,40 M78,68 L78,78 L68,78 M40,78 L30,78 L30,68" />
+
+    <!-- Пелюстки -->
+    <path android:fillColor="#E86A92" android:pathData="M54,54m-7,-10a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path android:fillColor="#E86A92" android:pathData="M54,54m-7,10a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path android:fillColor="#F08CAB" android:pathData="M54,54m-17,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <path android:fillColor="#F08CAB" android:pathData="M54,54m3,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+    <!-- Серединка -->
+    <path android:fillColor="#FFD166" android:pathData="M54,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+</vector>
